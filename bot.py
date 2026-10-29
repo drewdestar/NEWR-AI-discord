@@ -51,7 +51,10 @@ class Bot(commands.Bot):
         # guild.fetch_member() needs the Server Members Intent, which
         # must also be enabled in the Developer Portal (Bot section).
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents,
+        # Slash-only bot: no prefix commands exist, so command_prefix=None
+        # also silences the spurious "message content intent is missing"
+        # warning (the bot never reads message content).
+        super().__init__(command_prefix=None, help_command=None, intents=intents,
                          **_proxy_kwargs())
         self._started_at = int(time.time())
     async def setup_hook(self):

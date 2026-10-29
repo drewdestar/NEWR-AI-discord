@@ -46,7 +46,10 @@ async def chat(messages, model=None, system=None, temperature=0.7):
         headers["HTTP-Referer"] = "https://newrlabs.my.id"
         headers["X-Title"] = "NEWR AI"
     body = {"model": model, "messages": payload_msgs, "temperature": temperature}
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as s:
+    # trust_env=True: on this VM outbound TLS only works via the egress
+    # proxy in the environment; without it the provider call fails with
+    # SSL WRONG_VERSION_NUMBER even with a valid key.
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90), trust_env=True) as s:
         async with s.post(_url(), json=body, headers=headers) as r:
             data = await r.json(content_type=None)
             if r.status >= 400:
@@ -67,7 +70,7 @@ async def list_models():
     url = base + "/models" if not base.endswith("/chat/completions") else base.replace("/chat/completions", "/models")
     headers = {"Authorization": f"Bearer {os.getenv('AI_API_KEY')}"}
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), trust_env=True) as s:
             async with s.get(url, headers=headers) as r:
                 data = await r.json(content_type=None)
                 ids = [m["id"] for m in data.get("data", [])] if isinstance(data, dict) else []

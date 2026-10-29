@@ -1,5 +1,5 @@
 """Tools cog: 20 slash commands using only no-key public APIs or pure Python."""
-import discord, ast, operator, random, hashlib, base64, uuid, re, json, urllib.request, urllib.parse
+import discord, ast, operator, random, hashlib, base64, uuid, re, json, urllib.request, urllib.parse, asyncio
 from discord import app_commands
 from discord.ext import commands
 
@@ -8,12 +8,28 @@ def _get_json(url):
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.load(r)
 
+async def _get_json_async(url):
+    # Synchronous urllib blocks the event loop; run it in a thread so
+    # slow APIs cannot stall the bot or exceed Discord's 3s window.
+    # trust_env is honoured by urllib via the proxy env vars.
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _get_json, url)
+
 def _safe_eval(node):
     ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
            ast.Mod: operator.mod, ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos}
     if isinstance(node, ast.Expression): return _safe_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)): return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in ops: return ops[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        if isinstance(node.value, int) and abs(node.value) > 10**12:
+            raise ValueError("number too large")
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in ops:
+        if isinstance(node.op, ast.Pow):
+            base = _safe_eval(node.left); exp = _safe_eval(node.right)
+            if abs(exp) > 1000 or (isinstance(base, (int, float)) and abs(base) > 1 and abs(exp) * (abs(base) ** 0.5 if abs(base) < 10 else 10) > 10000):
+                raise ValueError("exponent too large")
+            return operator.pow(base, exp)
+        return ops[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in ops: return ops[type(node.op)](_safe_eval(node.operand))
     raise ValueError("unsupported expression")
 
@@ -45,42 +61,46 @@ class Tools(commands.Cog):
 
     @app_commands.command(name="convert-currency", description="Convert currency via a free no-key rates API")
     async def convert_currency(self, it: discord.Interaction, amount: float, from_currency: str, to_currency: str):
+        await it.response.defer()
         try:
-            data = _get_json(f"https://api.frankfurter.app/latest?from={from_currency.upper()}&to={to_currency.upper()}")
+            data = await _get_json_async(f"https://api.frankfurter.app/latest?from={from_currency.upper()}&to={to_currency.upper()}")
             rate = data["rates"][to_currency.upper()]
-            await it.response.send_message(f"{amount} {from_currency.upper()} = {amount*rate:.2f} {to_currency.upper()} (rate {rate}, date {data.get('date')})")
-        except Exception as e: await it.response.send_message(f"Currency conversion failed: {e}", ephemeral=True)
+            await it.followup.send(f"{amount} {from_currency.upper()} = {amount*rate:.2f} {to_currency.upper()} (rate {rate}, date {data.get('date')})")
+        except Exception as e: await it.followup.send(f"Currency conversion failed: {e}", ephemeral=True)
 
     @app_commands.command(name="weather-info", description="Current weather for a city, via Open-Meteo (no key)")
     async def weather_info(self, it: discord.Interaction, city: str):
+        await it.response.defer()
         try:
-            g = _get_json(f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1")
-            if not g.get("results"): await it.response.send_message(f"City not found: {city}", ephemeral=True); return
+            g = await _get_json_async(f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1")
+            if not g.get("results"): await it.followup.send(f"City not found: {city}", ephemeral=True); return
             loc = g["results"][0]
-            w = _get_json(f"https://api.open-meteo.com/v1/forecast?latitude={loc['latitude']}&longitude={loc['longitude']}&current=temperature_2m,wind_speed_10m,relative_humidity_2m,weather_code")
+            w = await _get_json_async(f"https://api.open-meteo.com/v1/forecast?latitude={loc['latitude']}&longitude={loc['longitude']}&current=temperature_2m,wind_speed_10m,relative_humidity_2m,weather_code")
             c = w["current"]
-            await it.response.send_message(f"Weather in {loc['name']}, {loc.get('country','')}: {c['temperature_2m']}°C, humidity {c['relative_humidity_2m']}%, wind {c['wind_speed_10m']} km/h, code {c['weather_code']}.")
-        except Exception as e: await it.response.send_message(f"Weather lookup failed: {e}", ephemeral=True)
+            await it.followup.send(f"Weather in {loc['name']}, {loc.get('country','')}: {c['temperature_2m']}°C, humidity {c['relative_humidity_2m']}%, wind {c['wind_speed_10m']} km/h, code {c['weather_code']}.")
+        except Exception as e: await it.followup.send(f"Weather lookup failed: {e}", ephemeral=True)
 
     @app_commands.command(name="define", description="Define an English word via a free dictionary API")
     async def define(self, it: discord.Interaction, word: str):
+        await it.response.defer()
         try:
-            data = _get_json(f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}")
+            data = await _get_json_async(f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}")
             defs = []
             for meaning in data[0].get("meanings", [])[:2]:
                 for d in meaning.get("definitions", [])[:2]: defs.append(f"({meaning.get('partOfSpeech','')}) {d['definition']}")
-            await it.response.send_message(f"**{word}**\n" + "\n".join(defs) if defs else f"No definition found for {word}.")
-        except Exception as e: await it.response.send_message(f"Definition lookup failed: {e}", ephemeral=True)
+            await it.followup.send(f"**{word}**\n" + "\n".join(defs) if defs else f"No definition found for {word}.")
+        except Exception as e: await it.followup.send(f"Definition lookup failed: {e}", ephemeral=True)
 
     @app_commands.command(name="search-web", description="Summarise the top DuckDuckGo instant answer for a query (no key)")
     async def search_web(self, it: discord.Interaction, query: str):
+        await it.response.defer()
         try:
-            data = _get_json(f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1")
+            data = await _get_json_async(f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1")
             text = data.get("AbstractText") or data.get("Answer") or ""
             topics = [t.get("Text","") for t in data.get("RelatedTopics", [])[:3] if isinstance(t, dict)]
             out = text or ("Related: " + " | ".join(topics) if topics else "No instant answer found. Try a more specific query.")
-            await it.response.send_message(out[:1900])
-        except Exception as e: await it.response.send_message(f"Web search failed: {e}", ephemeral=True)
+            await it.followup.send(out[:1900])
+        except Exception as e: await it.followup.send(f"Web search failed: {e}", ephemeral=True)
 
     @app_commands.command(name="base64-encode", description="Base64-encode text")
     async def b64e(self, it: discord.Interaction, text: str):

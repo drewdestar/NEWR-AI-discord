@@ -23,7 +23,13 @@ def _con(path):
 
 def add_message(path, user_id, role, content):
     con = _con(path); con.execute("INSERT INTO history(user_id,role,content,created_at) VALUES(?,?,?,?)",
-        (str(user_id), role, content, time.time())); con.commit(); con.close()
+        (str(user_id), role, content, time.time()))
+    # Prune to the newest 200 rows per user (reads only ever use the last
+    # 8-12), so history cannot grow unboundedly.
+    con.execute("""DELETE FROM history WHERE user_id=? AND id NOT IN
+        (SELECT id FROM history WHERE user_id=? ORDER BY id DESC LIMIT 200)""",
+        (str(user_id), str(user_id)))
+    con.commit(); con.close()
 
 def get_history(path, user_id, limit=12):
     con = _con(path)
